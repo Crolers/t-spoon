@@ -1,0 +1,36 @@
+package crolers.tgstream.tgraph.state;
+
+import crolers.tgstream.tgraph.db.ObjectVersion;
+import crolers.tgstream.tgraph.db.Object;
+
+public class PL4Strategy extends PL3Strategy {
+
+    /**
+     * NOTE: Remember that the watermark is a transaction id.
+     *
+     * Writing is allowed if every version after the watermark had been created by a tnx with tid greater than this transaction's tid.
+     * <p>
+     * This means that later transactions acted without knowing that this transaction would have been executed.
+     * The StrictnessEnforcer will make later transaction REPLAY; however, this transaction is perfectly legal.
+     * <p>
+     * If we find a version after the watermark that is earlier than this transaction, this transaction
+     * must be REPLAYed and wait for its turn.
+     */
+    @Override
+    public boolean canWrite(long tid, long timestamp, long watermark, Object<?> object) {
+        for (ObjectVersion<?> version : object.getVersionsAfter(watermark)) {
+            // version.version is the same as version.createdBy...
+            if (version.version < tid) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    @Override
+    public <V> ObjectVersion<V> installVersion(long tid, long timestamp, Object<V> object, V version) {
+        // we use transaction ids for versioning
+        return object.addVersion(tid, tid, version);
+    }
+}

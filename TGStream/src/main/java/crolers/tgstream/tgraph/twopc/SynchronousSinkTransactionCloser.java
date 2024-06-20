@@ -1,0 +1,34 @@
+package crolers.tgstream.tgraph.twopc;
+
+import crolers.tgstream.tgraph.Metadata;
+
+import java.util.Collections;
+
+/**
+ * Created by crolers
+ */
+public class SynchronousSinkTransactionCloser extends AbstractCloseOperatorTransactionCloser {
+    public SynchronousSinkTransactionCloser(int closeBatchSize) {
+        super(closeBatchSize);
+    }
+
+    @Override
+    public void applyProtocolOnMetadata(Metadata metadata) throws Exception {
+        long dependency;
+        if (metadata.dependencyTracking.isEmpty()) {
+            dependency = -1;
+        } else {
+            dependency = Collections.max(metadata.dependencyTracking);
+        }
+
+        String message = CloseTransactionNotification.serialize(
+                metadata.tGraphID,
+                metadata.timestamp,
+                metadata.vote,
+                metadata.cohorts.size(),
+                dependency
+        );
+
+        send(metadata.cohorts, message);
+    }
+}

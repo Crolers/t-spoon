@@ -1,0 +1,100 @@
+package crolers.tgstream.tgraph.state;
+
+import crolers.tgstream.metrics.MetricAccumulator;
+import crolers.tgstream.tgraph.Enriched;
+import crolers.tgstream.tgraph.Vote;
+import crolers.tgstream.tgraph.db.OptimisticTransactionExecutor;
+import crolers.tgstream.tgraph.db.Transaction;
+import crolers.tgstream.tgraph.twopc.TRuntimeContext;
+import org.apache.flink.api.common.accumulators.IntCounter;
+import org.apache.flink.api.java.functions.KeySelector;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.function.Consumer;
+
+/**
+ * Created by crolers
+ */
+public class OptimisticStateOperator<T, V> extends StateOperator<T, V> {
+    private transient OptimisticTransactionExecutor transactionExecutor;
+
+    // stats
+    private IntCounter replays = new IntCounter();
+    private Map<String, Long> hitTimestamps = new HashMap<>();
+    private MetricAccumulator hitRate = new MetricAccumulator();
+    private MetricAccumulator inputRate = new MetricAccumulator();
+    private Long lastTS;
+
+    public OptimisticStateOperator(
+            int tGraphID,
+            String nameSpace,
+            StateFunction<T, V> stateFunction,
+            KeySelector<T, String> ks,
+            TRuntimeContext tRuntimeContext) {
+        super(tGraphID, nameSpace, stateFunction, ks, tRuntimeContext);
+    }
+
+    @Override
+    public void open() throws Exception {
+        super.open();
+        this.transactionExecutor = new OptimisticTransactionExecutor(
+                tRuntimeContext.getIsolationLevel(),
+                tRuntimeContext.isDependencyTrackingEnabled(),
+                tRuntimeContext.needWaitOnRead()
+        );
+
+        getRuntimeContext().addAccumulator("replays-at-state", replays);
+        getRuntimeContext().addAccumulator("hit-rate", hitRate);
+        getRuntimeContext().addAccumulator("input-rate", inputRate);
+    }
+
+    @Override
+    public void close() throws Exception {
+        super.close();
+        transactionExecutor.close();
+    }
+
+    @Override
+    protected void execute(String key, Enriched<T> record, Transaction<V> transaction) {
+        Consumer<Void> andThen = aVoid -> {
+            record.metadata.dependencyTracking = new HashSet<>(transaction.getDependencies());
+            record.metadata.vote = transaction.vote;
+            if (transaction.vote == Vote.COMMIT) {
+                V version = transaction.getVersion(key);
+                // The namespace contains the partition for later recovery
+                record.metadata.addUpdate(shardID, key, version);
+            }
+            collector.safeCollect(record);
+
+            // ------------ updates stats
+
+            if (transaction.vote == Vote.REPLAY) {
+                replays.add(1);
+            }
+
+            if (lastTS == null) {
+                lastTS = System.nanoTime();
+            }
+
+            long now = System.nanoTime();
+            //System.nanoTime() 用于得到时间差
+            inputRate.add(Math.pow(10, 9) / (double) (now - lastTS));
+            lastTS = now;
+
+            Long lastTimestampForThisKey = hitTimestamps.get(key);
+            if (lastTimestampForThisKey != null) {
+                hitRate.add(Math.pow(10, 9) / (double) (now - lastTimestampForThisKey));
+            }
+            hitTimestamps.put(key, now);
+        };
+
+        transactionExecutor.executeOperation(key, transaction, andThen);
+    }
+
+    @Override
+    protected void onGlobalTermination(Transaction<V> transaction) {
+        // does nothing
+    }
+}
